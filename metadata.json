@@ -1,0 +1,8 @@
+{
+  "name": "Remix Sutan JadwalPintar - Algoritma Penjadwalan Sekolah",
+  "description": "Sistem pemroses algoritma penjadwalan sekolah dan madrasah otomatis tingkat lanjut bebas konflik (100% anti-bentrok) dengan integrasi Supabase dan AI Gemini.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
