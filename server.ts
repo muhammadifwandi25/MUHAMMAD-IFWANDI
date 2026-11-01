@@ -6,8 +6,20 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
+import fs from 'fs';
 import dotenv from 'dotenv';
 import { GoogleGenAI, Type } from '@google/genai';
+import { LocalDatabaseEngine } from './src/server/localDatabase.ts';
+import {
+  DEFAULT_SCHOOL_PROFILE,
+  INITIAL_GURU,
+  INITIAL_KELAS,
+  INITIAL_MAPEL,
+  INITIAL_PIKET,
+  INITIAL_PLOTTING,
+  INITIAL_USERS,
+  INITIAL_WAKTU,
+} from './src/data/initialData.ts';
 
 dotenv.config();
 
@@ -17,6 +29,29 @@ const PORT = Number(process.env.PORT) || 3000;
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '15mb' }));
+
+  // Initialize Local SQLite Database Engine
+  const localDb = new LocalDatabaseEngine();
+  const dbStatus = localDb.getStatus();
+  if (!dbStatus.hasData) {
+    console.log('Database lokal baru terdeteksi. Melakukan inisialisasi master data...');
+    try {
+      localDb.saveAllData({
+        guru: INITIAL_GURU,
+        mapel: INITIAL_MAPEL,
+        kelas: INITIAL_KELAS,
+        waktu: INITIAL_WAKTU,
+        plotting: INITIAL_PLOTTING,
+        jadwal: [],
+        piket: INITIAL_PIKET,
+        profile: DEFAULT_SCHOOL_PROFILE,
+        users: INITIAL_USERS,
+      });
+      console.log('Inisialisasi database lokal SQLite berhasil.');
+    } catch (e) {
+      console.error('Gagal inisialisasi data awal database lokal:', e);
+    }
+  }
 
   // Initialize Gemini client utility server-side
   let ai: GoogleGenAI | null = null;
@@ -373,6 +408,191 @@ Anda hanya boleh merespons dengan objek JSON murni tanpa format markdown (tanpa 
       return res.status(500).json({
         error: err.message || 'Terjadi kesalahan saat menyinkronkan data ke Supabase.',
       });
+    }
+  });
+
+  // ============================================================================
+  // LOCAL DATABASE ENDPOINTS (SQLite File & Local Server DB)
+  // ============================================================================
+
+  // 1. Get Local Database Status & Table Counts
+  app.get('/api/local-db/status', (_req, res) => {
+    try {
+      const status = localDb.getStatus();
+      res.json({
+        success: true,
+        data: status,
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        success: false,
+        error: err.message || 'Gagal membaca status database lokal',
+      });
+    }
+  });
+
+  // 2. Fetch All Data Stored in Local Database
+  app.get('/api/local-db/data', (_req, res) => {
+    try {
+      const allData = localDb.getAllData();
+      const status = localDb.getStatus();
+      res.json({
+        success: true,
+        data: allData,
+        status,
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        success: false,
+        error: err.message || 'Gagal membaca data dari database lokal',
+      });
+    }
+  });
+
+  // 3. Save / Commit All Tables to Local SQLite Database (Atomic Transaction)
+  app.post('/api/local-db/save', (req, res) => {
+    try {
+      const { guru, mapel, kelas, waktu, plotting, jadwal, piket, profile, users } = req.body;
+      const result = localDb.saveAllData({ guru, mapel, kelas, waktu, plotting, jadwal, piket, profile, users });
+      const status = localDb.getStatus();
+      res.json({
+        success: true,
+        message: result.message,
+        status,
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        success: false,
+        error: err.message || 'Gagal menyimpan ke database lokal',
+      });
+    }
+  });
+
+  // 4. Update Local Database Configuration (Mode SQLite vs MySQL LAN vs Postgres LAN)
+  app.post('/api/local-db/config', (req, res) => {
+    try {
+      const updatedConfig = localDb.saveConfig(req.body);
+      res.json({
+        success: true,
+        message: 'Konfigurasi koneksi database lokal berhasil disimpan.',
+        config: updatedConfig,
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        success: false,
+        error: err.message || 'Gagal menyimpan konfigurasi database lokal',
+      });
+    }
+  });
+
+  // 5. Test TCP Socket Connectivity to Local Server (XAMPP MySQL / PostgreSQL / LAN)
+  app.post('/api/local-db/test-connection', async (req, res) => {
+    try {
+      const { host, port } = req.body;
+      const targetHost = host ? String(host).trim() : '127.0.0.1';
+      const targetPort = Number(port) || 3306;
+
+      const probe = await localDb.testTcpConnection(targetHost, targetPort);
+      res.json({
+        success: probe.reachable,
+        host: targetHost,
+        port: targetPort,
+        latencyMs: probe.latencyMs,
+        message: probe.reachable
+          ? `Port ${targetPort} pada host ${targetHost} aktif & dapat dihubungi (${probe.latencyMs} ms).`
+          : `Gagal terhubung ke ${targetHost}:${targetPort}. ${probe.error || 'Pastikan service database lokal sudah dijalankan.'}`,
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        success: false,
+        message: err.message || 'Gagal menguji konektivitas server database lokal.',
+      });
+    }
+  });
+
+  // 6. Export SQL Dump (MySQL / MariaDB or SQLite or Postgres)
+  app.get('/api/local-db/export/sql', (req, res) => {
+    try {
+      const dialect = (req.query.dialect as 'mysql' | 'sqlite' | 'postgres') || 'mysql';
+      const sqlDump = localDb.getSqlDump(dialect);
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="jadwal_sekolah_${dialect}_dump.sql"`);
+      res.send(sqlDump);
+    } catch (err: any) {
+      res.status(500).send(`Error generating SQL dump: ${err.message}`);
+    }
+  });
+
+  // 7. Export Full JSON Backup
+  app.get('/api/local-db/export/json', (_req, res) => {
+    try {
+      const allData = localDb.getAllData();
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="backup_jadwal_lokal.json"');
+      res.json({
+        app: 'SIM-JADWAL SEKOLAH',
+        engine: 'SQLite-Local',
+        exportDate: new Date().toISOString(),
+        data: allData,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 8. Download Binary SQLite File (.sqlite)
+  app.get('/api/local-db/download-sqlite', (_req, res) => {
+    try {
+      const filePath = localDb.getDbFilePath();
+      if (fs.existsSync(filePath)) {
+        res.download(filePath, 'jadwal_lokal.sqlite');
+      } else {
+        res.status(404).send('File SQLite belum ditemukan.');
+      }
+    } catch (err: any) {
+      res.status(500).send(`Error downloading SQLite file: ${err.message}`);
+    }
+  });
+
+  // 9. Import JSON Data Backup to Local Database
+  app.post('/api/local-db/import', (req, res) => {
+    try {
+      const incoming = req.body.data || req.body;
+      if (!incoming || typeof incoming !== 'object') {
+        return res.status(400).json({ success: false, error: 'Format berkas backup tidak valid' });
+      }
+      localDb.saveAllData(incoming);
+      res.json({
+        success: true,
+        message: 'Data backup berhasil dipulihkan ke dalam database lokal!',
+        status: localDb.getStatus(),
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message || 'Gagal memulihkan cadangan data' });
+    }
+  });
+
+  // 10. Reset Local Database to Standard Seed Template
+  app.post('/api/local-db/reset', (_req, res) => {
+    try {
+      localDb.saveAllData({
+        guru: INITIAL_GURU,
+        mapel: INITIAL_MAPEL,
+        kelas: INITIAL_KELAS,
+        waktu: INITIAL_WAKTU,
+        plotting: INITIAL_PLOTTING,
+        jadwal: [],
+        piket: INITIAL_PIKET,
+        profile: DEFAULT_SCHOOL_PROFILE,
+        users: INITIAL_USERS,
+      });
+      res.json({
+        success: true,
+        message: 'Database lokal berhasil direset kembali ke konfigurasi standar sekolah.',
+        status: localDb.getStatus(),
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
     }
   });
 
